@@ -855,6 +855,7 @@ static void populate_server_prohibitions_locked(JsonObject& obj)
 	if (prohibit_freecam) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_freecam").str())); }
 	if (prohibit_teleport) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_teleport").str())); }
 	if (prohibit_scripts) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_scripts").str())); }
+	if (prohibit_local_metadata_patches) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_local_metadata_patches").str())); }
 	obj.add(ObfusString("prohibitions"), std::move(arr));
 }
 
@@ -879,6 +880,14 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		prohibit_freecam = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_freecam"));
 		prohibit_teleport = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_teleport"));
 		prohibit_scripts = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_scripts"));
+		const bool next_prohibit_local_metadata_patches = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_local_metadata_patches"));
+#if METADATA_PATCHES && SOUP_BITS == 64
+		if (prohibit_local_metadata_patches != next_prohibit_local_metadata_patches)
+		{
+			reload_metadata_patches = true;
+		}
+#endif
+		prohibit_local_metadata_patches = next_prohibit_local_metadata_patches;
 
 		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("udp_proxy_upstream")); e != g_server_tunables.strings.end())
 		{
@@ -903,6 +912,17 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 			reload_metadata_patches = true;
 		}
 #endif
+	}
+
+	if (prohibit_scripts)
+	{
+		std::lock_guard lock(running_scripts_mtx);
+		for (auto* script : running_scripts)
+		{
+			delete script;
+		}
+		running_scripts.clear();
+		broadcast_running_scripts_locked();
 	}
 
 	{
@@ -2074,10 +2094,14 @@ static void load_metadata_patches()
 	{ ObfusString name("add_query_assignment"); lua_setglobal(L, name.c_str()); }
 
 	std::string remote_patches;
+	bool local_patches_prohibited;
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
 		remote_patches = server_metadata_patches;
+		local_patches_prohibited = prohibit_local_metadata_patches;
 	}
+	lua_pushboolean(L, local_patches_prohibited);
+	{ ObfusString name("prohibit_local_metadata_patches"); lua_setglobal(L, name.c_str()); }
 
 	size_t size;
 	auto data = g_repo.find(soup::joaat::compileTimeHash("OpenWF/helpers/load_metadata_patches.pluto"), size);
@@ -5425,7 +5449,7 @@ BOOL APIENTRY DllMain(HMODULE hmod, DWORD reason, PVOID)
 		}
 #endif
 
-		if (!auto_start_scripts.empty())
+		if (!prohibit_scripts && !auto_start_scripts.empty())
 		{
 			ObfusString base_path("OpenWF/Scripts/");
 			for (const auto& path : auto_start_scripts)

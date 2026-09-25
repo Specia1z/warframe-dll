@@ -12,7 +12,8 @@ inline bool prohibit_disable_profanity_filter = false;
 inline bool prohibit_fov_override = false;
 inline bool prohibit_freecam = false;
 inline bool prohibit_teleport = false;
-inline bool prohibit_scripts = false;
+inline bool prohibit_scripts = true;
+inline bool prohibit_local_metadata_patches = true;
 
 extern std::string get_bootstrapper_title();
 extern void owf_set_build_hash(const char build_hash[22]);
