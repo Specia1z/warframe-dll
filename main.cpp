@@ -914,17 +914,6 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 #endif
 	}
 
-	if (prohibit_scripts)
-	{
-		std::lock_guard lock(running_scripts_mtx);
-		for (auto* script : running_scripts)
-		{
-			delete script;
-		}
-		running_scripts.clear();
-		broadcast_running_scripts_locked();
-	}
-
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
 		JsonObject obj;
