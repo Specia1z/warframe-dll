@@ -13,6 +13,7 @@ bool owfServerTunables::load(const char* data, size_t size, bool delta)
 	if (!delta)
 	{
 		bools.clear();
+		strings.clear();
 	}
 
 	auto jr = json::decode(data, size);
@@ -33,7 +34,7 @@ bool owfServerTunables::load(const char* data, size_t size, bool delta)
 			}
 			else if (e.second->isStr())
 			{
-				strings.emplace(joaat::hash(e.first->reinterpretAsStr().value), e.second->reinterpretAsStr().value);
+				strings.insert_or_assign(joaat::hash(e.first->reinterpretAsStr().value), e.second->reinterpretAsStr().value);
 			}
 		}
 	}

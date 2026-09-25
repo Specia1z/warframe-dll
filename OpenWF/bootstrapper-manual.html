@@ -155,6 +155,8 @@
 		<li><code>nrs</code> — If given, this string will be used as the NRS server address for pre-U15.14 versions.</li>
 		<li><code>irc</code> — If given, this string will be used as the IRC server address for pre-U17 versions.</li>
 		<li><code>udp_proxy_upstream</code> — If given, starts a UDP proxy at <code>127.0.0.1:6951</code> with the given IP-port pair as an upstream.</li>
+		<li><code>metadata_patches</code> — Metadata Patch text supplied by the server. It is loaded after local patch files, so server operations take precedence for the same fields.</li>
+		<li><code>metadata_patches_revision</code> — An identifier or hash for the server-supplied Metadata Patch text, exposed through the status API for troubleshooting.</li>
 	</ul>
 	<p>To aid in troubleshooting, the Bootstrapper assumes that a compatible server responds to this request with status code 200 and a valid JSON object, otherwise showing a warning.</p>
 	<h2>Traffic Deviations</h2>
@@ -172,7 +174,7 @@
 	<h2>Label Replacements</h2>
 	<p>Label Replacements are loaded by instantiating the <code>OpenWF/Label Replacements.pluto</code> script. You can modify this script but by default it loads replacements from <code>OpenWF/Label Replacements.cat.txt</code>. As implied by the extension, it uses the <a href="https://github.com/calamity-inc/Soup/blob/senpai/docs/user/cat.md" target="_blank">CaT</a> format. Note that nested nodes are ignored.</p>
 	<h2>Metadata Patches</h2>
-	<p>Metadata Patches are loaded from <code>.txt</code> files in the <code>OpenWF/Metadata Patches/</code> folder.</p>
+	<p>Metadata Patches are loaded from <code>.txt</code> files in the <code>OpenWF/Metadata Patches/</code> folder and may additionally be supplied by the server through tunables. Server patches are loaded last.</p>
 	<p>They are parsed line by line. If a line starts with <code>/</code>, a new patch for the given absolute path is started.</p>
 	<p>It is possible to have a single patch affect multiple paths by using ampersands. The start of a patch can also take up multiple lines if the ampersand is at the end of the line or the beginning of the next line.</p>
 	<p>For the remaining processing, leading and trailing spaces and tabs are ignored:</p>
