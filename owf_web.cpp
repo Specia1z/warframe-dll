@@ -43,13 +43,16 @@ struct owfContentTask : public Task
 {
 	SharedPtr<Worker> s;
 	HttpRequestTask hrt;
+	HttpRequestTask official_hrt;
 
 	owfContentTask(Socket& _s, HttpRequest&& hr)
 		: s(Scheduler::get()->getShared(_s)), hrt(
 			std::move(hr),
 			secure_connections ? &Socket::certchain_validator_default : &Socket::certchain_validator_none // Technically, insecure connections are fine for content, but we want keep-alive connections.
-		)
+		), official_hrt(HttpRequest(ObfusString("content.warframe.com").str(), hrt.hr.path))
 	{
+		official_hrt.hr.use_tls = true;
+		official_hrt.hr.path_is_encoded = true;
 		if (secure_connections)
 		{
 			hrt.require_ecdhe = true;
@@ -61,6 +64,19 @@ struct owfContentTask : public Task
 	{
 		if (hrt.tickUntilDone())
 		{
+			if (hrt.result.has_value() && hrt.result->status_code == 404)
+			{
+				if (!official_hrt.tickUntilDone())
+				{
+					return;
+				}
+				if (official_hrt.result.has_value() && official_hrt.result->status_code == 200)
+				{
+					ServerWebService::sendContent(*static_cast<Socket*>(s.get()), std::move(*official_hrt.result));
+					setWorkDone();
+					return;
+				}
+			}
 #if LOGGING
 			if (hrt.result.has_value())
 			{

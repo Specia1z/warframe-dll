@@ -2688,7 +2688,7 @@ static void log_optional_scan_failure(bool important)
 	}
 }
 
-static void report_critical_failure(std::string msg)
+static void report_critical_failure_at(std::string msg, int caller_line)
 {
 	int ndlls = 0;
 	if (std::filesystem::is_regular_file(ObfusString("wtsapi32.dll").str())) ++ndlls;
@@ -2699,13 +2699,18 @@ static void report_critical_failure(std::string msg)
 		msg.push_back(' ');
 		msg.append(get_core_string(ObfusString("appmdll").str()));
 	}
+	msg.append("\n[main.cpp:");
+	msg.append(std::to_string(caller_line));
+	msg.push_back(']');
 
 	const auto msg_utf16 = soup::unicode::utf8_to_utf16(msg);
 	const auto title_utf16 = soup::unicode::utf8_to_utf16(get_bootstrapper_title());
 	MessageBoxW(0, msg_utf16.c_str(), title_utf16.c_str(), MB_OK | MB_ICONERROR);
 }
 
-static bool should_setup_optional_conditional_feature(void* ptr)
+#define report_critical_failure(msg) report_critical_failure_at(msg, __LINE__)
+
+static bool should_setup_optional_conditional_feature_at(void* ptr, int caller_line)
 {
 	if (!ptr)
 	{
@@ -2713,11 +2718,13 @@ static bool should_setup_optional_conditional_feature(void* ptr)
 		conout << "A conditional pattern scan has failed. This would be fatal in a public build." << std::endl;
 		return false;
 #else
-		report_critical_failure(get_core_string(ObfusString("sigfailbad").str()));
+		report_critical_failure_at(get_core_string(ObfusString("sigfailbad").str()), caller_line);
 #endif
 	}
 	return true;
 }
+
+#define should_setup_optional_conditional_feature(ptr) should_setup_optional_conditional_feature_at(ptr, __LINE__)
 
 void start_bgscript()
 {
@@ -3334,6 +3341,20 @@ static SOUP_FORCEINLINE void create_all_hooks()
 				encstr_discharge_hook.enable();
 			}
 		}
+		if (!encstr_discharge_hook.target && game_version >= GV(44, 0, 0))
+		{
+			SIG_INST("48 8B C4 48 89 50 10 53 41 56 48 83 EC 58 48 89 68 18 48 8B D9 48 8B 09 4C 8B F2"); // U44: zlib flush, cipher final, CRC, output move
+			auto encstr_discharge = Module(nullptr).range.scan(sig_inst).as<void*>();
+#if LOGGING
+			conout << "encstr_discharge (U44) = " << encstr_discharge << std::endl;
+#endif
+			SOUP_IF_LIKELY (encstr_discharge)
+			{
+				encstr_discharge_hook.detour = reinterpret_cast<void*>(&encstr_discharge_detour);
+				encstr_discharge_hook.target = encstr_discharge;
+				encstr_discharge_hook.enable();
+			}
+		}
 
 		SOUP_IF_UNLIKELY (!encstr_append_hook.target || !encstr_discharge_hook.target)
 		{
@@ -3639,6 +3660,11 @@ static SOUP_FORCEINLINE void create_all_hooks()
 	{
 		SIG_INST("73 43 B2 05");
 		auto xp_based_level_jnb = Module(nullptr).range.scan(sig_inst);
+		if (!xp_based_level_jnb && game_version >= GV(44, 0, 0))
+		{
+			SIG_INST("73 42 B2 05 48 8D 0D ? ? ? ? E8"); // U44: same XP-cap branch, shorter displacement
+			xp_based_level_jnb = Module(nullptr).range.scan(sig_inst);
+		}
 #if LOGGING
 		conout << "xp_based_level_jnb = " << xp_based_level_jnb.as<void*>() << std::endl;
 #endif

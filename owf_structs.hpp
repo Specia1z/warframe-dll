@@ -33,7 +33,9 @@ union GameString
 		if (len > sizeof(shrt.data))
 		{
 			lng.ptr = (char*)data;
-			lng.metadata = 0xFF'FFFFFFF'0000000ull | (len & 0xFFFFFFF);
+			// U44 treats the legacy borrowed-string tag as an owned allocation.
+			lng.metadata = (game_version >= GV(44, 0, 0)
+				? 0xFF00000000000000ull : 0xFF'FFFFFFF'0000000ull) | (len & 0xFFFFFFF);
 		}
 		else
 		{
@@ -47,7 +49,14 @@ union GameString
 	{
 		if (isLong())
 		{
-			lng.metadata = 0xFF'FFFFFFF'0000000ull | (len & 0xFFFFFFF);
+			if (game_version >= GV(44, 0, 0))
+			{
+				lng.metadata = (lng.metadata & ~0xFFFFFFFull) | (len & 0xFFFFFFF);
+			}
+			else
+			{
+				lng.metadata = 0xFF'FFFFFFF'0000000ull | (len & 0xFFFFFFF);
+			}
 		}
 		else
 		{
