@@ -893,16 +893,6 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		prohibit_freecam = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_freecam"));
 		prohibit_teleport = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_teleport"));
 		prohibit_scripts = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_scripts"));
-		const bool next_prohibit_local_metadata_patches = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_local_metadata_patches"));
-#if METADATA_PATCHES && SOUP_BITS == 64
-		if (prohibit_local_metadata_patches != next_prohibit_local_metadata_patches)
-		{
-			should_reload_metadata_patches = true;
-			should_request_type_reload = metadata_type_mgr.load(std::memory_order_acquire) != nullptr;
-		}
-#endif
-		prohibit_local_metadata_patches = next_prohibit_local_metadata_patches;
-
 		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("udp_proxy_upstream")); e != g_server_tunables.strings.end())
 		{
 			set_udp_proxy_upstream(e->second);
@@ -2145,15 +2135,10 @@ static void load_metadata_patches()
 	{ ObfusString name("add_query_assignment"); lua_setglobal(L, name.c_str()); }
 
 	std::string remote_patches;
-	bool local_patches_prohibited;
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
 		remote_patches = server_metadata_patches;
-		local_patches_prohibited = prohibit_local_metadata_patches;
 	}
-	lua_pushboolean(L, local_patches_prohibited);
-	{ ObfusString name("prohibit_local_metadata_patches"); lua_setglobal(L, name.c_str()); }
-
 	size_t size;
 	auto data = g_repo.find(soup::joaat::compileTimeHash("OpenWF/helpers/load_metadata_patches.pluto"), size);
 	if (luaL_loadbuffer(L, data, size, nullptr) != LUA_OK

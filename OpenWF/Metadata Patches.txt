@@ -1,3 +1,4 @@
+# Example only: local metadata patch files are not loaded or applied. Configure patches on the server.
 # Lines starting with # are a comment.
 #
 # An example patch that changes "Fever Strike" to be called "Saryn Strike" and replaces Toxin with Corrosive:
