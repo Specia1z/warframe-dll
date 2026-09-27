@@ -155,6 +155,8 @@
 		<li><code>nrs</code> — If given, this string will be used as the NRS server address for pre-U15.14 versions.</li>
 		<li><code>irc</code> — If given, this string will be used as the IRC server address for pre-U17 versions.</li>
 		<li><code>udp_proxy_upstream</code> — If given, starts a UDP proxy at <code>127.0.0.1:6951</code> with the given IP-port pair as an upstream.</li>
+		<li><code>metadata_patches</code> — Metadata Patch text supplied by the server. It is loaded after local patch files, so server operations take precedence for the same fields.</li>
+		<li><code>metadata_patches_revision</code> — An identifier or hash for the server-supplied Metadata Patch text, exposed through the status API for troubleshooting.</li>
 	</ul>
 	<p>To aid in troubleshooting, the Bootstrapper assumes that a compatible server responds to this request with status code 200 and a valid JSON object, otherwise showing a warning.</p>
 	<h2>Traffic Deviations</h2>

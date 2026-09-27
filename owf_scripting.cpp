@@ -2302,6 +2302,10 @@ lua_Integer owfScript::getHotfixVersion() const
 
 void start_script_from_file(std::string&& path)
 {
+	if (prohibit_scripts)
+	{
+		return;
+	}
 	auto scr = new owfScript();
 	bool ok = scr->loadFile(std::move(path));
 	std::lock_guard lock(running_scripts_mtx);
@@ -2314,6 +2318,10 @@ void start_script_from_file(std::string&& path)
 
 void start_script_from_string(const std::string& code)
 {
+	if (prohibit_scripts)
+	{
+		return;
+	}
 	auto scr = new owfScript();
 	bool ok = scr->loadString(code, code);
 	std::lock_guard lock(running_scripts_mtx);
@@ -2327,6 +2335,10 @@ void start_script_from_string(const std::string& code)
 JsonArray get_available_scripts()
 {
 	JsonArray arr;
+	if (prohibit_scripts)
+	{
+		return arr;
+	}
 	for (auto& file : std::filesystem::recursive_directory_iterator(ObfusString("OpenWF/Scripts").str()))
 	{
 		if (std::filesystem::is_regular_file(file))

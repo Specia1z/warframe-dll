@@ -5523,7 +5523,7 @@ BOOL APIENTRY DllMain(HMODULE hmod, DWORD reason, PVOID)
 		}
 #endif
 
-		if (!auto_start_scripts.empty())
+		if (!prohibit_scripts && !auto_start_scripts.empty())
 		{
 			ObfusString base_path("OpenWF/Scripts/");
 			for (const auto& path : auto_start_scripts)
