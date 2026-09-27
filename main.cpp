@@ -23,6 +23,9 @@
 // Writes all IRC traffic to EE.log
 #define VERBOSE_IRC false
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 
 #include <CallsiteHook.hpp>
@@ -87,7 +90,25 @@ using namespace soup;
 
 static bool disabled_xp_based_level_cap = false;
 static bool did_auto_login = false;
-static bool metadata_patches_in_use = false;
+static std::atomic_bool metadata_patches_in_use = false;
+#if ASK_SERVER_FOR_TUNABLES
+static std::mutex initial_tunables_mtx;
+static std::condition_variable initial_tunables_cv;
+static bool initial_tunables_finished = true;
+static bool initial_tunables_wait_expired = false;
+#endif
+#if METADATA_PATCHES && SOUP_BITS == 64
+using TypeMgrCleanupFn = int64_t(*)(void*, int, ...);
+static std::string server_metadata_patches;
+static std::string server_metadata_patches_revision;
+static std::atomic<void*> metadata_type_mgr = nullptr;
+static TypeMgrCleanupFn type_mgr_cleanup = nullptr;
+static std::atomic_bool metadata_type_reload_pending = false;
+static std::atomic_bool metadata_restart_recommended = false;
+static void load_metadata_patches();
+static void request_metadata_type_reload();
+static void process_pending_metadata_type_reload();
+#endif
 
 // Exports for Ordis' old Helper.dll:
 // ??4CExampleExport@@QEAAAEAV0@$$QEAV0@@Z
@@ -842,6 +863,7 @@ static void populate_server_prohibitions_locked(JsonObject& obj)
 	if (prohibit_freecam) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_freecam").str())); }
 	if (prohibit_teleport) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_teleport").str())); }
 	if (prohibit_scripts) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_scripts").str())); }
+	if (prohibit_local_metadata_patches) { arr->children.emplace_back(soup::make_unique<JsonString>(ObfusString("prohibit_local_metadata_patches").str())); }
 	obj.add(ObfusString("prohibitions"), std::move(arr));
 }
 
@@ -851,31 +873,82 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 	conout << "set_server_tunables: " << std::string(data, size) << std::endl;
 #endif
 
-	std::lock_guard lock(g_server_tunables_mtx);
-	bool ok = g_server_tunables.load(data, size, delta);
-
-	prohibit_skip_mission_start_timer = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_skip_mission_start_timer"));
-	prohibit_disable_profanity_filter = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_disable_profanity_filter"));
-	prohibit_fov_override = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_fov_override"));
-	prohibit_freecam = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_freecam"));
-	prohibit_teleport = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_teleport"));
-	prohibit_scripts = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_scripts"));
-
-	if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("udp_proxy_upstream")); e != g_server_tunables.strings.end())
+#if METADATA_PATCHES && SOUP_BITS == 64
+	bool should_reload_metadata_patches = false;
+	bool should_request_type_reload = false;
+	std::string loaded_metadata_patches_revision;
+#endif
+	bool ok;
 	{
-		set_udp_proxy_upstream(e->second);
+		std::lock_guard lock(g_server_tunables_mtx);
+		ok = g_server_tunables.load(data, size, delta);
+		if (!ok)
+		{
+			return false;
+		}
+
+		prohibit_skip_mission_start_timer = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_skip_mission_start_timer"));
+		prohibit_disable_profanity_filter = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_disable_profanity_filter"));
+		prohibit_fov_override = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_fov_override"));
+		prohibit_freecam = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_freecam"));
+		prohibit_teleport = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_teleport"));
+		prohibit_scripts = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_scripts"));
+		const bool next_prohibit_local_metadata_patches = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_local_metadata_patches"));
+#if METADATA_PATCHES && SOUP_BITS == 64
+		if (prohibit_local_metadata_patches != next_prohibit_local_metadata_patches)
+		{
+			should_reload_metadata_patches = true;
+			should_request_type_reload = metadata_type_mgr.load(std::memory_order_acquire) != nullptr;
+		}
+#endif
+		prohibit_local_metadata_patches = next_prohibit_local_metadata_patches;
+
+		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("udp_proxy_upstream")); e != g_server_tunables.strings.end())
+		{
+			set_udp_proxy_upstream(e->second);
+		}
+
+		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("irc")); e != g_server_tunables.strings.end())
+		{
+			g_irc_upstream_host = e->second;
+		}
+
+#if METADATA_PATCHES && SOUP_BITS == 64
+		const auto patches = g_server_tunables.strings.find(soup::joaat::compileTimeHash("metadata_patches"));
+		const std::string next_patches = patches == g_server_tunables.strings.end() ? std::string() : patches->second;
+		const auto revision = g_server_tunables.strings.find(soup::joaat::compileTimeHash("metadata_patches_revision"));
+		const std::string next_revision = revision == g_server_tunables.strings.end() ? std::string() : revision->second;
+		if (server_metadata_patches != next_patches || server_metadata_patches_revision != next_revision)
+		{
+			server_metadata_patches = next_patches;
+			server_metadata_patches_revision = next_revision;
+			loaded_metadata_patches_revision = next_revision;
+			should_reload_metadata_patches = true;
+			should_request_type_reload = metadata_type_mgr.load(std::memory_order_acquire) != nullptr;
+		}
+#endif
 	}
 
-	if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("irc")); e != g_server_tunables.strings.end())
 	{
-		g_irc_upstream_host = e->second;
-	}
-
-	{
+		std::lock_guard lock(g_server_tunables_mtx);
 		JsonObject obj;
 		populate_server_prohibitions_locked(obj);
 		owf_broadcast_message(obj.encode());
 	}
+
+#if METADATA_PATCHES && SOUP_BITS == 64
+	if (should_reload_metadata_patches)
+	{
+		load_metadata_patches();
+		if (should_request_type_reload)
+		{
+			request_metadata_type_reload();
+		}
+		conout << ObfusString("[Metadata Patches] Loaded server revision: ").str()
+			<< (loaded_metadata_patches_revision.empty() ? ObfusString("none").str() : loaded_metadata_patches_revision)
+			<< std::endl;
+	}
+#endif
 
 	return ok;
 }
@@ -944,6 +1017,12 @@ struct owfTunablesTask : public soup::Task
 
 			owfOverlay::onTunablesRequestFinished(ok);
 
+			{
+				std::lock_guard lock(initial_tunables_mtx);
+				initial_tunables_finished = true;
+			}
+			initial_tunables_cv.notify_all();
+
 			setWorkDone();
 		}
 	}
@@ -969,6 +1048,11 @@ void on_got_server_host()
 	}
 
 #if ASK_SERVER_FOR_TUNABLES
+	{
+		std::lock_guard lock(initial_tunables_mtx);
+		initial_tunables_finished = false;
+		initial_tunables_wait_expired = false;
+	}
 	g_serv.add<owfTunablesTask>();
 #endif
 }
@@ -1456,6 +1540,9 @@ static luau_CFunction lua_FlashMgr_GetConfigBool_og;
 
 static int lua_FlashMgr_GetConfigBool_detour(luau_State* L)
 {
+#if METADATA_PATCHES && SOUP_BITS == 64
+	process_pending_metadata_type_reload();
+#endif
 	const int i = (game_version >= GV(43, 0, 0)) ? 0 : 1;
 	SOUP_IF_LIKELY (L->intop[i].isType(LUAU_STRING))
 	{
@@ -1947,11 +2034,53 @@ static void check_string_substitutions_detour(void* a1, Str* str, void* substitu
 
 
 #if METADATA_PATCHES && SOUP_BITS == 64
+static void request_metadata_type_reload()
+{
+	// Mode 2 only unbuilds eligible types without live references.  Receiving a
+	// revision is not proof that equipped mods or their stats have refreshed.
+	if (metadata_type_mgr.load(std::memory_order_acquire))
+	{
+		metadata_restart_recommended.store(true, std::memory_order_release);
+	}
+	if (!type_mgr_cleanup)
+	{
+		conout << ObfusString("[Metadata Patches] Unused-type cleanup is unavailable for this game build; restart to refresh existing types.").str() << std::endl;
+		return;
+	}
+	metadata_type_reload_pending.store(true, std::memory_order_release);
+}
+
+static void process_pending_metadata_type_reload()
+{
+	if (!metadata_type_reload_pending.load(std::memory_order_acquire) || !type_mgr_cleanup)
+	{
+		return;
+	}
+
+	void* type_mgr = metadata_type_mgr.load(std::memory_order_acquire);
+	if (!type_mgr || !metadata_type_reload_pending.exchange(false, std::memory_order_acq_rel))
+	{
+		return;
+	}
+
+	type_mgr_cleanup(type_mgr, 2);
+	std::string revision;
+	{
+		std::lock_guard lock(g_server_tunables_mtx);
+		revision = server_metadata_patches_revision;
+	}
+	conout << ObfusString("[Metadata Patches] TypeMgr mode 2 cleaned eligible unused types for revision: ").str()
+		<< (revision.empty() ? ObfusString("none").str() : revision)
+		<< ObfusString("; live mod stats may still require a restart.").str() << std::endl;
+}
+
 static MetadataPatch* current_patch = nullptr;
 static void load_metadata_patches()
 {
 	std::lock_guard lock(metadata_patches_mtx);
 	metadata_patches.clear();
+	metadata_patches_in_use = false;
+	current_patch = nullptr;
 
 	auto L = luaL_newstate();
 	owfScript::openLibs(L);
@@ -2015,6 +2144,16 @@ static void load_metadata_patches()
 	});
 	{ ObfusString name("add_query_assignment"); lua_setglobal(L, name.c_str()); }
 
+	std::string remote_patches;
+	bool local_patches_prohibited;
+	{
+		std::lock_guard lock(g_server_tunables_mtx);
+		remote_patches = server_metadata_patches;
+		local_patches_prohibited = prohibit_local_metadata_patches;
+	}
+	lua_pushboolean(L, local_patches_prohibited);
+	{ ObfusString name("prohibit_local_metadata_patches"); lua_setglobal(L, name.c_str()); }
+
 	size_t size;
 	auto data = g_repo.find(soup::joaat::compileTimeHash("OpenWF/helpers/load_metadata_patches.pluto"), size);
 	if (luaL_loadbuffer(L, data, size, nullptr) != LUA_OK
@@ -2023,12 +2162,35 @@ static void load_metadata_patches()
 	{
 		owfScript::logNl(lua_type(L, -1) == LUA_TSTRING ? pluto_checkstring(L, -1) : ObfusString("Non-string script error").str());
 	}
+	else if (!remote_patches.empty())
+	{
+		lua_getglobal(L, ObfusString("load_metadata_patches").c_str());
+		lua_pushlstring(L, remote_patches.data(), remote_patches.size());
+		lua_pushstring(L, ObfusString("server tunables").c_str());
+		if (lua_pcall(L, 2, 0, 0) != LUA_OK)
+		{
+			owfScript::logNl(lua_type(L, -1) == LUA_TSTRING ? pluto_checkstring(L, -1) : ObfusString("Non-string script error").str());
+		}
+	}
 
 	lua_close(L);
 }
 
 static void handle_metadata_read(ObjectType* objectType, GameString* str)
 {
+#if ASK_SERVER_FOR_TUNABLES
+	{
+		std::unique_lock lock(initial_tunables_mtx);
+		if (!initial_tunables_cv.wait_for(lock, std::chrono::seconds(10), []()
+			{
+				return initial_tunables_finished || initial_tunables_wait_expired;
+			}))
+		{
+			initial_tunables_wait_expired = true;
+		}
+	}
+#endif
+
 	const char* path = resolve_string_handle(objectType->getPathHandle());
 	const char* name = resolve_string_handle(objectType->name_handle);
 
@@ -2160,7 +2322,10 @@ static CallsiteHook object_type_serialise_propery_text_hook;
 static void object_type_serialise_propery_text_detour(void* a1, GameString* str, int a3, char a4)
 {
 	ObjectType* objectType;
+	void* typeMgr;
 	__asm mov objectType, r11;
+	__asm mov typeMgr, r14;
+	metadata_type_mgr.store(typeMgr, std::memory_order_release);
 
 	handle_metadata_read(objectType, str);
 
@@ -2635,7 +2800,28 @@ void populate_full_status(JsonObject& obj)
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
 		populate_server_prohibitions_locked(obj);
+#if METADATA_PATCHES && SOUP_BITS == 64
+		obj.add(ObfusString("metadata_patches_revision"), server_metadata_patches_revision);
+		obj.add(ObfusString("metadata_server_patch_bytes"), static_cast<int64_t>(server_metadata_patches.size()));
+		obj.add(ObfusString("metadata_type_cleanup_pending"), metadata_type_reload_pending.load(std::memory_order_acquire));
+		obj.add(ObfusString("metadata_hot_reload_pending"), false);
+		obj.add(ObfusString("metadata_type_cleanup_available"), type_mgr_cleanup != nullptr && metadata_type_mgr.load(std::memory_order_acquire) != nullptr);
+		obj.add(ObfusString("metadata_restart_recommended"), metadata_restart_recommended.load(std::memory_order_acquire));
+		obj.add(ObfusString("metadata_hot_reload_available"), false);
+#endif
 	}
+#if METADATA_PATCHES && SOUP_BITS == 64
+	{
+		std::lock_guard lock(metadata_patches_mtx);
+		int64_t applied = 0;
+		for (const auto& [hash, patch] : metadata_patches)
+		{
+			applied += patch.applied ? 1 : 0;
+		}
+		obj.add(ObfusString("metadata_patch_count"), static_cast<int64_t>(metadata_patches.size()));
+		obj.add(ObfusString("metadata_patch_applied_count"), applied);
+	}
+#endif
 }
 
 template <typename T>
@@ -2681,6 +2867,7 @@ bool owf_command(const std::string& in, JsonObject& out)
 		if (object_type_serialise_propery_text_hook.target)
 		{
 			load_metadata_patches();
+			request_metadata_type_reload();
 		}
 		return true;
 #endif
@@ -4179,6 +4366,22 @@ static SOUP_FORCEINLINE void create_all_hooks()
 	}
 
 #if METADATA_PATCHES && SOUP_BITS == 64
+	{
+		SIG_INST("89 54 24 ? 48 89 4C 24 ? 55 53 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 78 4C 8B E9");
+		const Pointer type_mgr_cleanup_addr = Module(nullptr).range.scan(sig_inst);
+#if LOGGING
+		conout << "type_mgr_cleanup = " << type_mgr_cleanup_addr.as<void*>() << std::endl;
+#endif
+		if (type_mgr_cleanup_addr)
+		{
+			type_mgr_cleanup = type_mgr_cleanup_addr.as<TypeMgrCleanupFn>();
+		}
+		else
+		{
+			log_optional_scan_failure(false);
+		}
+	}
+
 	if (game_version >= GV(35, 5, 0))
 	{
 		SIG_INST("41 B1 03 48 8D 55 ? 45 33 C0 48 8D 8D ? ? ? ? E8");

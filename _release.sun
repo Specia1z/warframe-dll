@@ -11,4 +11,5 @@ arg -DPRIVATE=false
 arg -O3
 
 global_arg -flto
+global_arg -fuse-ld=lld
 linker_arg version.res

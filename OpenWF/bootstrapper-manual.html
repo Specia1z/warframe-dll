@@ -191,6 +191,7 @@
 		</li>
 	</ul>
 	<p>If multiple patches affect the same absolute path, they are combined.</p>
+	<p>Receiving a new server revision reloads the patch rules, but does not guarantee that already loaded types or equipped mod stats are refreshed. The optional TypeMgr mode 2 cleanup only affects eligible unused types. Restart the game to reliably apply a changed patch to existing mods. In <code>/status</code>, <code>metadata_patch_applied_count</code> counts intercepted metadata reads, not live stat updates; <code>metadata_restart_recommended</code> flags a revision received after types were loaded, and <code>metadata_type_cleanup_available</code> reports whether unused-type cleanup can be attempted.</p>
 	<h2>Content Management</h2>
 	<p>The Bootstrapper handles the client's content requests by consulting the <code>OpenWF/Content/</code> folder, forwarding the request to the configured server in case a file is not found.</p>
 	<p>At minimum, the client requests <code>/0/H.Cache.bin!x_---------------------w</code> (where <code>x</code> depends on the game version), although the Bootstrapper disables this request in versions below U33.6. The Bootstrapper has 3 modes for managing this file:</p>

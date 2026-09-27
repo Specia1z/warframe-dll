@@ -10,30 +10,33 @@ using namespace soup;
 
 bool owfServerTunables::load(const char* data, size_t size, bool delta)
 {
-	if (!delta)
-	{
-		bools.clear();
-	}
-
 	auto jr = json::decode(data, size);
 	if (!jr || !jr->isObj())
 	{
 		return false;
 	}
+
+	if (!delta)
+	{
+		bools.clear();
+		strings.clear();
+	}
 	for (const auto& e : jr->reinterpretAsObj().children)
 	{
 		if (e.first->isStr())
 		{
+			const auto hash = joaat::hash(e.first->reinterpretAsStr().value);
 			if (e.second->isBool())
 			{
+				bools.erase(std::remove(bools.begin(), bools.end(), hash), bools.end());
 				if (e.second->reinterpretAsBool().value)
 				{
-					bools.emplace_back(joaat::hash(e.first->reinterpretAsStr().value));
+					bools.emplace_back(hash);
 				}
 			}
 			else if (e.second->isStr())
 			{
-				strings.emplace(joaat::hash(e.first->reinterpretAsStr().value), e.second->reinterpretAsStr().value);
+				strings.insert_or_assign(hash, e.second->reinterpretAsStr().value);
 			}
 		}
 	}
