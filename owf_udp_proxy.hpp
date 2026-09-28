@@ -3,12 +3,43 @@
 #include "owf_console.hpp"
 #include "owf_web.hpp"
 
+#include <vector>
+
 struct owfUdpProxy
 {
+	struct Route
+	{
+		soup::SocketAddr downstream_addr;
+		soup::SharedPtr<soup::Socket> upstream;
+	};
+
 	inline static soup::SharedPtr<soup::Worker> downstream;
-	inline static soup::SocketAddr downstream_addr;
-	inline static soup::SharedPtr<soup::Socket> upstream;
 	inline static soup::SocketAddr upstream_addr;
+	inline static std::vector<Route> routes;
+
+	static Route* findRouteByDownstream(const soup::SocketAddr& addr) noexcept
+	{
+		for (auto& route : routes)
+		{
+			if (route.downstream_addr == addr)
+			{
+				return &route;
+			}
+		}
+		return nullptr;
+	}
+
+	static Route* findRouteByUpstream(const soup::Socket& socket) noexcept
+	{
+		for (auto& route : routes)
+		{
+			if (route.upstream.get() == &socket)
+			{
+				return &route;
+			}
+		}
+		return nullptr;
+	}
 
 	static void setUpstreamAddr(const soup::SocketAddr& newAddr)
 	{
@@ -18,7 +49,11 @@ struct owfUdpProxy
 			conout << "owfUdpProxy: New upstream: " << newAddr.toString() << std::endl;
 #endif
 			const bool bind = owfUdpProxy::upstream_addr.ip.isZero();
-			owfUdpProxy::upstream.reset();
+			for (auto& route : owfUdpProxy::routes)
+			{
+				route.upstream->close();
+			}
+			owfUdpProxy::routes.clear();
 			owfUdpProxy::upstream_addr = newAddr;
 			if (bind)
 			{
@@ -35,41 +70,50 @@ struct owfUdpProxy
 		return g_serv.bindUdp(6951, [](soup::Socket& s, soup::SocketAddr&& addr, std::string&& data) SOUP_EXCAL
 		{
 			downstream = g_serv.getShared(s);
-			downstream_addr = addr;
 
-			const bool init = !upstream;
-			if (init)
+			auto route = findRouteByDownstream(addr);
+			if (!route)
 			{
-				upstream = g_serv.addSocket();
+				routes.emplace_back();
+				route = &routes.back();
+				route->downstream_addr = addr;
+				route->upstream = g_serv.addSocket();
+#if LOGGING
+				conout << "owfUdpProxy: New route: " << route->downstream_addr.toString() << " -> " << upstream_addr.toString() << std::endl;
+#endif
 			}
 
 #if LOGGING
-			conout << "owfUdpProxy: " << downstream_addr.toString() << " -> " << upstream_addr.toString() << ": " << soup::string::bin2hex(data) << std::endl;
+			conout << "owfUdpProxy: " << route->downstream_addr.toString() << " -> " << upstream_addr.toString() << ": " << soup::string::bin2hex(data) << std::endl;
 #endif
-			if (upstream->udpClientSend(upstream_addr, data))
+			if (route->upstream->udpClientSend(upstream_addr, data))
 			{
-				upstreamRecv();
+				upstreamRecv(*route->upstream);
 			}
 		});
 	}
 
-	static void upstreamRecv()
+	static void upstreamRecv(soup::Socket& upstream_socket)
 	{
-		upstream->udpRecv([](soup::Socket&, soup::SocketAddr&& addr, std::string&& data, soup::Capture&&)
+		upstream_socket.udpRecv([](soup::Socket& s, soup::SocketAddr&& addr, std::string&& data, soup::Capture&&)
 		{
-			if (upstream && upstream_addr == addr)
+			auto route = findRouteByUpstream(s);
+			if (route && upstream_addr == addr)
 			{
 #if LOGGING
-				conout << "owfUdpProxy: " << upstream_addr.toString() << " -> " << downstream_addr.toString() << ": " << soup::string::bin2hex(data) << std::endl;
+				conout << "owfUdpProxy: " << upstream_addr.toString() << " -> " << route->downstream_addr.toString() << ": " << soup::string::bin2hex(data) << std::endl;
 #endif
-				static_cast<soup::Socket*>(downstream.get())->udpServerSend(downstream_addr, data);
-				upstreamRecv();
+				static_cast<soup::Socket*>(downstream.get())->udpServerSend(route->downstream_addr, data);
 			}
 			else
 			{
 #if LOGGING
 				conout << "owfUdpProxy: Discarding packet from " << addr.toString() << ": " << soup::string::bin2hex(data) << std::endl;
 #endif
+			}
+			if (route)
+			{
+				upstreamRecv(s);
 			}
 		});
 	}
