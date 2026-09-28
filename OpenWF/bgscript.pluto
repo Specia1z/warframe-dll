@@ -1,9 +1,3 @@
-if OWF_CLIENT_HOTFIX ~= 0 then
-	owf_console_set_title(OWF_CLIENT_TITLE.." hotfix "..OWF_CLIENT_HOTFIX)
-else
-	owf_console_set_title(OWF_CLIENT_TITLE)
-end
-
 owf_register_custom_route("/favicon.ico", "image/png", owf_repo_find("OpenWF/favicon.png"))
 
 if OWF_IS_WINE then
@@ -92,8 +86,7 @@ then
 
 	local manifest_typeid = compareversions(owf_get_build_version(), "2025.09.25.17.01") >= 0 ? "E" : "D"
 
-	local first_run = not io.exists("OpenWF/Content/0")
-	if first_run then
+	if not io.exists("OpenWF/Content/0") then
 		io.mkdirs("OpenWF/Content/0")
 	end
 	if compressed, decompressed_size := owf_cache_find("H.Misc", "/H.Cache.bin") then
@@ -106,21 +99,36 @@ then
 	if oodle_available() then
 		load(owf_repo_find("OpenWF/lib/cachelib.pluto"))()
 
+		local active_meta_manifest_path = "OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w"
+		local backup_meta_manifest_path = active_meta_manifest_path..".bak"
+		local original_meta_manifest
+		local original_cache_manifest_hash
+		if cont := io.contents(backup_meta_manifest_path) then
+			original_meta_manifest = new CacheManifest(shcc_unpack(cont).H, true)
+			original_cache_manifest_hash = b64m_encode(original_meta_manifest:getHash("/B.Cache.Windows.bin"))
+
+			-- Keep the complete official manifest generation available locally, even when
+			-- Content Replacements/0 does not exist (the launcher removes empty folders).
+			for original_meta_manifest:getPaths() as path do
+				if path:sub(1, 9) == "/B.Cache." and path:sub(-4) == ".bin" then
+					if compressed, decompressed_size := owf_cache_find("H.Misc", path) then
+						if compressed:byte(1) == 0x80 then
+							local hash = b64m_encode(shcc_decompress_chunk_oodle(compressed, 1, decompressed_size):sub(1, 16))
+							io.contents("OpenWF/Content/0"..path.."!"..manifest_typeid.."_"..hash, shcc_pack_H(compressed, decompressed_size))
+						end
+					end
+				end
+			end
+		end
+
 		local og_cache_manifest_hash
 
 		io.mkdir("OpenWF/Content Replacements")
 		if io.isdir("OpenWF/Content Replacements/0") then
 			local t = os.millis()
 
-			do
-				local compressed, decompressed_size = owf_cache_find("H.Misc", "/B.Cache.Windows.bin")
-				if compressed:byte(1) == 0x80 then
-					io.contents("OpenWF/Content/0/B.Cache.Windows.bin!"..manifest_typeid.."_"..b64m_encode(shcc_decompress_chunk_oodle(compressed, 1, decompressed_size):sub(1, 16)), shcc_pack_H(compressed, decompressed_size))
-				end
-			end
-
-			local meta_manifest = new CacheManifest(shcc_unpack(io.contents("OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w.bak")).H, true)
-			og_cache_manifest_hash = b64m_encode(meta_manifest:getHash("/B.Cache.Windows.bin"))
+			local meta_manifest = new CacheManifest(shcc_unpack(io.contents(backup_meta_manifest_path)).H, true)
+			og_cache_manifest_hash = original_cache_manifest_hash
 			if cont := io.contents("OpenWF/Content/0/B.Cache.Windows.bin!"..manifest_typeid.."_"..og_cache_manifest_hash) then
 				local main_manifest = new CacheManifest(shcc_unpack(cont).H, true)
 
@@ -184,12 +192,11 @@ then
 
 		if not any_mods then
 			if io.exists("OpenWF/Content/0/UNMANAGED") then
-				local meta_manifest = new CacheManifest(shcc_unpack(io.contents("OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w")).H, true)
+				local meta_manifest = new CacheManifest(shcc_unpack(io.contents(active_meta_manifest_path)).H, true)
 				og_cache_manifest_hash = b64m_encode(meta_manifest:getHash("/B.Cache.Windows.bin"))
 			else
 				if not og_cache_manifest_hash then
-					local meta_manifest = new CacheManifest(shcc_unpack(io.contents("OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w.bak")).H, true)
-					og_cache_manifest_hash = b64m_encode(meta_manifest:getHash("/B.Cache.Windows.bin"))
+					og_cache_manifest_hash = original_cache_manifest_hash
 				end
 			end
 			owf_set_build_hash(og_cache_manifest_hash)
@@ -200,9 +207,6 @@ then
 
 	if not any_mods and not io.exists("OpenWF/Content/0/UNMANAGED") then
 		io.copy("OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w.bak", "OpenWF/Content/0/H.Cache.bin!"..manifest_typeid.."_---------------------w")
-		if first_run then
-			io.contents("OpenWF/Content/0/UNMANAGED", "")
-		end
 	end
 end
 

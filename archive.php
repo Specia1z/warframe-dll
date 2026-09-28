@@ -10,16 +10,18 @@ function get_bootstrapper_title(): string
 {
 	foreach (explode("\n", file_get_contents("main.hpp")) as $line)
 	{
-		if (str_starts_with($line, "#define BOOTSTRAPPER_TITLE"))
+		if (preg_match('/^#define\s+BOOTSTRAPPER_TITLE\s+"([^"]+)"$/', trim($line), $matches))
 		{
-			return substr($line, 28, -2);
+			return $matches[1];
 		}
 	}
+	throw new RuntimeException("BOOTSTRAPPER_TITLE not found in main.hpp");
 }
 
 $target_version = get_bootstrapper_title();
 $code_version = substr($target_version, strlen("OpenWF Bootstrapper v"));
-$all_tags = explode("\n", shell_exec("git tag --list"));
+$tag_output = shell_exec("git tag --list") ?? "";
+$all_tags = $tag_output === "" ? [] : (preg_split('/\R/', trim($tag_output)) ?: []);
 $base_tag = in_array($code_version, $all_tags) ? $code_version : "";
 
 chdir("tools");

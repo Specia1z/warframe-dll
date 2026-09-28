@@ -32,6 +32,17 @@
 
 using namespace soup;
 
+static bool is_content_request_path(const std::string& path)
+{
+	return path.size() > 2
+		&& ((path[1] == '0' && path[2] == '/')
+			|| (path[1] == '0' && path[2] == '_')
+			|| (path[1] == '7' && path[2] == '/') // Dx11 (< U40)
+			|| (path[1] == '8' && path[2] == '/') // Dx12 (< U40)
+			|| (path[1] == '9' && path[2] == '/') // Dx11 (>= U40)
+			|| (path[1] == 'A' && path[2] == '/')); // Dx12 (>= U40)
+}
+
 struct owfWebsocketTag
 {
 	static inline uint32_t last_id = 0;
@@ -64,7 +75,12 @@ struct owfContentTask : public Task
 	{
 		if (hrt.tickUntilDone())
 		{
-			if (hrt.result.has_value() && hrt.result->status_code == 404)
+			const bool should_try_official = !hrt.result.has_value()
+				|| hrt.result->status_code == 404
+				|| hrt.result->status_code == 408
+				|| hrt.result->status_code == 429
+				|| hrt.result->status_code >= 500;
+			if (should_try_official)
 			{
 				if (!official_hrt.tickUntilDone())
 				{
@@ -186,23 +202,16 @@ void start_builtin_http_server()
 	{
 		ServerWebService srv([](soup::Socket& s, soup::HttpRequest&& req, soup::ServerWebService&)
 		{
-			if (client_http_logging)
-			{
-				conout << get_core_string(ObfusString("webonreq").str()) << ": " << req.path << std::endl;
-			}
 			if (joaat::hash(req.path.substr(0, 8)) == joaat::compileTimeHash("/origin/"))
 			{
 				req.path.erase(0, 16);
 			}
-			if (req.path.size() > 2
-				&& ((req.path[1] == '0' && req.path[2] == '/')
-					|| (req.path[1] == '0' && req.path[2] == '_')
-					|| (req.path[1] == '7' && req.path[2] == '/') // Dx11 (< U40)
-					|| (req.path[1] == '8' && req.path[2] == '/') // Dx12 (< U40)
-					|| (req.path[1] == '9' && req.path[2] == '/') // Dx11 (>= U40)
-					|| (req.path[1] == 'A' && req.path[2] == '/') // Dx12 (>= U40)
-					)
-				)
+			const bool content_request = is_content_request_path(req.path);
+			if (client_http_logging && !content_request)
+			{
+				conout << get_core_string(ObfusString("webonreq").str()) << ": " << req.path << std::endl;
+			}
+			if (content_request)
 			{
 				// Try to locate file locally
 				{

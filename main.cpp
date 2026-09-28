@@ -91,6 +91,16 @@ using namespace soup;
 static bool disabled_xp_based_level_cap = false;
 static bool did_auto_login = false;
 static std::atomic_bool metadata_patches_in_use = false;
+static std::atomic_bool native_force_proxy_enabled = false;
+static std::atomic<uint8_t*> native_force_proxy_flag = nullptr;
+
+static void apply_native_force_proxy()
+{
+	if (auto flag = native_force_proxy_flag.load(std::memory_order_acquire))
+	{
+		*flag = native_force_proxy_enabled.load(std::memory_order_relaxed) ? 1 : 0;
+	}
+}
 #if ASK_SERVER_FOR_TUNABLES
 static std::mutex initial_tunables_mtx;
 static std::condition_variable initial_tunables_cv;
@@ -190,13 +200,7 @@ extern "C" __declspec(dllexport) BOOL VerQueryValueW(LPCVOID pBlock, LPCWSTR lpS
 
 std::string get_bootstrapper_title()
 {
-	auto title = ObfusString(BOOTSTRAPPER_TITLE).str();
-	if (const auto hotfix = g_repo.hotfix)
-	{
-		title.append(ObfusString(" hotfix ").str());
-		title.append(std::to_string(hotfix));
-	}
-	return title;
+	return ObfusString(BOOTSTRAPPER_WINDOW_TITLE).str();
 }
 
 
@@ -893,6 +897,7 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		prohibit_freecam = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_freecam"));
 		prohibit_teleport = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_teleport"));
 		prohibit_scripts = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_scripts"));
+		native_force_proxy_enabled.store(g_server_tunables.getBool(joaat::compileTimeHash("force_native_proxy")), std::memory_order_relaxed);
 		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("udp_proxy_upstream")); e != g_server_tunables.strings.end())
 		{
 			set_udp_proxy_upstream(e->second);
@@ -918,6 +923,7 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		}
 #endif
 	}
+	apply_native_force_proxy();
 
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
@@ -1001,7 +1007,7 @@ struct owfTunablesTask : public soup::Task
 			if (!ok)
 			{
 				auto msg = get_core_string(ObfusString("tunafail").str());
-				soup::string::replaceAll(msg, ObfusString("|HOST|").str(), hrt.hr.getHost());
+				soup::string::replaceAll(msg, ObfusString("|HOST|").str(), ObfusString("[hidden]").str());
 				conout << std::move(msg) << std::endl;
 			}
 
@@ -1027,11 +1033,6 @@ void on_got_server_host()
 		server_host = ObfusString("127.0.0.1").str();
 	}
 
-	{
-		auto msg = get_core_string(ObfusString("gotsh").str());
-		soup::string::replaceAll(msg, ObfusString("|HOST|").str(), server_host);
-		conout << msg << std::endl;
-	}
 	if (autologin && !did_auto_login)
 	{
 		conout << get_core_string(ObfusString("alpend")) << std::endl;
@@ -4896,6 +4897,20 @@ static SOUP_FORCEINLINE void create_all_hooks()
 
 static SOUP_FORCEINLINE void do_pointer_scans()
 {
+	if (game_version >= GV(44, 0, 0))
+	{
+		SIG_INST("45 33 ED 44 38 2D ? ? ? ? 0F 85 ? ? ? ? 85 C9 B8 14 00 00 00 BA 0C 00 00 00");
+		auto native_force_proxy_cmp = Module(nullptr).range.scan(sig_inst);
+#if LOGGING
+		conout << "native_force_proxy_cmp = " << native_force_proxy_cmp.as<void*>() << std::endl;
+#endif
+		SOUP_IF_LIKELY (should_setup_optional_conditional_feature(native_force_proxy_cmp.as<void*>()))
+		{
+			native_force_proxy_flag.store(native_force_proxy_cmp.add(6).rip().as<uint8_t*>(), std::memory_order_release);
+			apply_native_force_proxy();
+		}
+	}
+
 	if (game_version >= GV(38, 5, 0))
 	{
 		SIG_INST("48 8D 4B 18 33 D2 E8 ? ? ? ? 33 D2 48 8D 4B 38 E8 ? ? ? ? 48 8B ? 24");
@@ -5194,18 +5209,18 @@ BOOL APIENTRY DllMain(HMODULE hmod, DWORD reason, PVOID)
 			}
 			else
 			{
-				MessageBoxA(0, "Please don't keep the Bootstrapper DLL (wtsapi32.dll, dwmapi.dll, or version.dll) in the same folder as any executable other than " EXE_NAME ".", BOOTSTRAPPER_TITLE, MB_OK | MB_ICONERROR);
+				MessageBoxA(0, "Please don't keep the Bootstrapper DLL (wtsapi32.dll, dwmapi.dll, or version.dll) in the same folder as any executable other than " EXE_NAME ".", BOOTSTRAPPER_WINDOW_TITLE, MB_OK | MB_ICONERROR);
 				return exit(1), FALSE;
 			}
 		}
 
 		if (!std::filesystem::exists(EXE_NAME))
 		{
-			MessageBoxA(0, "Launched with incorrect working directory; it must be the folder where " EXE_NAME " is.", BOOTSTRAPPER_TITLE, MB_OK | MB_ICONERROR);
+			MessageBoxA(0, "Launched with incorrect working directory; it must be the folder where " EXE_NAME " is.", BOOTSTRAPPER_WINDOW_TITLE, MB_OK | MB_ICONERROR);
 			return exit(1), FALSE;
 		}
 
-		owfConsole::setTitle(BOOTSTRAPPER_TITLE);
+		owfConsole::setTitle(BOOTSTRAPPER_WINDOW_TITLE);
 		owfConsole::activate();
 
 #if LOGGING
@@ -5430,8 +5445,6 @@ BOOL APIENTRY DllMain(HMODULE hmod, DWORD reason, PVOID)
 		{
 			owfConsole::setExclusiveOutput();
 		}
-
-		conout << get_core_string(ObfusString("freenote").str()) << std::endl;
 
 		owfScript::init();
 
