@@ -106,6 +106,10 @@ static std::mutex initial_tunables_mtx;
 static std::condition_variable initial_tunables_cv;
 static bool initial_tunables_finished = true;
 static bool initial_tunables_wait_expired = false;
+static bool server_version_check_received = false;
+static bool server_version_allowed = true;
+static std::string server_version_popup_title;
+static std::string server_version_popup_message;
 #endif
 #if METADATA_PATCHES && SOUP_BITS == 64
 using TypeMgrCleanupFn = int64_t(*)(void*, int, ...);
@@ -890,6 +894,15 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		{
 			return false;
 		}
+#if ASK_SERVER_FOR_TUNABLES
+		if (!delta)
+		{
+			server_version_check_received = false;
+			server_version_allowed = true;
+			server_version_popup_title.clear();
+			server_version_popup_message.clear();
+		}
+#endif
 
 		prohibit_skip_mission_start_timer = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_skip_mission_start_timer"));
 		prohibit_disable_profanity_filter = g_server_tunables.getBool(joaat::compileTimeHash("prohibit_disable_profanity_filter"));
@@ -907,6 +920,21 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		{
 			g_irc_upstream_host = e->second;
 		}
+
+#if ASK_SERVER_FOR_TUNABLES
+		if (auto e = g_server_tunables.strings.find(soup::joaat::compileTimeHash("client_version_status")); e != g_server_tunables.strings.end())
+		{
+			server_version_check_received = true;
+			server_version_allowed = e->second == "allowed";
+			if (!server_version_allowed)
+			{
+				const auto title = g_server_tunables.strings.find(soup::joaat::compileTimeHash("client_version_popup_title"));
+				const auto message = g_server_tunables.strings.find(soup::joaat::compileTimeHash("client_version_popup_message"));
+				server_version_popup_title = title == g_server_tunables.strings.end() ? ObfusString("OpenWF Bootstrapper").str() : title->second;
+				server_version_popup_message = message == g_server_tunables.strings.end() ? ObfusString("This client build is not supported by the server.").str() : message->second;
+			}
+		}
+#endif
 
 #if METADATA_PATCHES && SOUP_BITS == 64
 		const auto patches = g_server_tunables.strings.find(soup::joaat::compileTimeHash("metadata_patches"));
@@ -1009,6 +1037,26 @@ struct owfTunablesTask : public soup::Task
 				auto msg = get_core_string(ObfusString("tunafail").str());
 				soup::string::replaceAll(msg, ObfusString("|HOST|").str(), ObfusString("[hidden]").str());
 				conout << std::move(msg) << std::endl;
+			}
+			else
+			{
+				std::string title;
+				std::string message;
+				bool blocked = false;
+				{
+					std::lock_guard lock(g_server_tunables_mtx);
+					blocked = server_version_check_received && !server_version_allowed;
+					title = server_version_popup_title;
+					message = server_version_popup_message;
+				}
+				if (blocked)
+				{
+					const auto message_utf16 = soup::unicode::utf8_to_utf16(message);
+					const auto title_utf16 = soup::unicode::utf8_to_utf16(title);
+					MessageBoxW(0, message_utf16.c_str(), title_utf16.c_str(), MB_OK | MB_ICONERROR);
+					ExitProcess(1);
+					return;
+				}
 			}
 
 			owfOverlay::onTunablesRequestFinished(ok);
