@@ -1,0 +1,116 @@
+name: Build and Release DLL
+
+on:
+  pull_request:
+    branches:
+      - senpai
+  push:
+    branches:
+      - senpai
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SUN_VERSION: "0.5.0"
+  SUN_URL: "https://github.com/calamity-inc/Sun/releases/download/0.5.0/Windows.X64.zip"
+  SUN_SHA256: "3c2c83ed03e3bb3eeebeb39d556e7e5a258815c998f740c85af7ecb5600f083e"
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring
+          tools: none
+
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "21"
+
+      - name: Install Sun
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "Sun-$env:SUN_VERSION.zip"
+          Invoke-WebRequest -Uri $env:SUN_URL -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:SUN_SHA256) {
+            throw "Sun checksum mismatch: expected $env:SUN_SHA256, got $actual"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "Sun"
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          $sun = Join-Path $destination "Sun.exe"
+          if (-not (Test-Path -LiteralPath $sun)) {
+            throw "Sun.exe was not found after extraction"
+          }
+          $sunDirectory = Split-Path -Parent $sun
+          Add-Content -Path $env:GITHUB_PATH -Value $sunDirectory
+
+      - name: Verify build tools
+        shell: pwsh
+        run: |
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:GITHUB_WORKSPACE "tools")
+          php --version
+          sun help create
+          clang --version
+          llvm-rc --version
+          upx --version
+
+      - name: Build release DLL
+        shell: cmd
+        run: call "_clean build (release).bat"
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $files = @("dwmapi.dll", "Hotfix.owf") | Where-Object {
+            Test-Path -LiteralPath $_
+          }
+          if ($files.Count -eq 0) {
+            throw "The release produced no artifacts"
+          }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwf-dll-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            dwmapi.dll
+            Hotfix.owf
+            SHA256SUMS.txt
+
+      - name: Upload release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenWF Bootstrapper ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dwmapi.dll
+            Hotfix.owf
+            SHA256SUMS.txt
