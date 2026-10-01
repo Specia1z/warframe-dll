@@ -27,6 +27,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <unordered_map>
 
 #include <CallsiteHook.hpp>
 #include <CompactDetourHook.hpp>
@@ -93,6 +94,72 @@ static bool did_auto_login = false;
 static std::atomic_bool metadata_patches_in_use = false;
 static std::atomic_bool native_force_proxy_enabled = false;
 static std::atomic<uint8_t*> native_force_proxy_flag = nullptr;
+
+struct StoreItemRule
+{
+	int8_t giftable = -1;
+	int8_t purchase_mode = -1; // -1 = game default, 0 = platinum, 1 = Steam
+};
+static soup::Mutex store_item_rules_mtx;
+static std::unordered_map<uint32_t, StoreItemRule> store_item_rules;
+
+static void load_store_item_rules(const std::string& encoded)
+{
+	auto parsed = soup::json::decode(encoded.data(), encoded.size());
+	if (!parsed || !parsed->isObj())
+	{
+		return;
+	}
+
+	std::unordered_map<uint32_t, StoreItemRule> next;
+	for (const auto& entry : parsed->reinterpretAsObj().children)
+	{
+		if (!entry.first->isStr() || !entry.second->isObj())
+		{
+			continue;
+		}
+		StoreItemRule rule;
+		const auto& fields = entry.second->reinterpretAsObj();
+		if (auto* giftable = fields.find("giftable"); giftable && giftable->isBool())
+		{
+			rule.giftable = giftable->reinterpretAsBool().value ? 1 : 0;
+		}
+		if (auto* mode = fields.find("purchaseMode"); mode && mode->isStr())
+		{
+			const auto& value = mode->reinterpretAsStr().value;
+			rule.purchase_mode = value == "steam" ? 1 : value == "platinum" ? 0 : -1;
+		}
+		if (rule.giftable != -1 || rule.purchase_mode != -1)
+		{
+			next.emplace(soup::joaat::hash(entry.first->reinterpretAsStr().value), rule);
+		}
+	}
+	std::lock_guard lock(store_item_rules_mtx);
+	store_item_rules.swap(next);
+}
+
+static StoreItemRule rule_for_store_item(Object* item)
+{
+	if (!item || !item->type)
+	{
+		return {};
+	}
+	const char* path = resolve_string_handle(item->type->getPathHandle());
+	const char* name = resolve_string_handle(item->type->name_handle);
+	if (!path || !name)
+	{
+		return {};
+	}
+	uint32_t hash = soup::joaat::partialStr(path, 0);
+	hash = soup::joaat::partialStr(name, hash);
+	soup::joaat::finalise(hash);
+	std::lock_guard lock(store_item_rules_mtx);
+	if (auto it = store_item_rules.find(hash); it != store_item_rules.end())
+	{
+		return it->second;
+	}
+	return {};
+}
 
 static void apply_native_force_proxy()
 {
@@ -886,6 +953,8 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 	bool should_request_type_reload = false;
 	std::string loaded_metadata_patches_revision;
 #endif
+	std::string next_store_item_rules;
+	bool should_reload_store_item_rules = false;
 	bool ok;
 	{
 		std::lock_guard lock(g_server_tunables_mtx);
@@ -893,6 +962,16 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 		if (!ok)
 		{
 			return false;
+		}
+		if (auto rules = g_server_tunables.strings.find(soup::joaat::compileTimeHash("store_item_rules")); rules != g_server_tunables.strings.end())
+		{
+			next_store_item_rules = rules->second;
+			should_reload_store_item_rules = true;
+		}
+		else if (!delta)
+		{
+			next_store_item_rules = "{}";
+			should_reload_store_item_rules = true;
 		}
 #if ASK_SERVER_FOR_TUNABLES
 		if (!delta)
@@ -950,6 +1029,10 @@ bool set_server_tunables(const char* data, size_t size, bool delta)
 			should_request_type_reload = metadata_type_mgr.load(std::memory_order_acquire) != nullptr;
 		}
 #endif
+	}
+	if (should_reload_store_item_rules)
+	{
+		load_store_item_rules(next_store_item_rules);
 	}
 	apply_native_force_proxy();
 
@@ -1929,6 +2012,30 @@ static GameString* get_profile_dir_detour(uintptr_t a1)
 
 
 static CompactDetourHook lua_AvatarEntry_excludedFromSimulacrum_get_hook;
+
+static CompactDetourHook store_item_giftable_hook;
+static CompactDetourHook store_item_steam_hook;
+static CompactDetourHook store_item_platform_locked_hook;
+
+static int store_item_rule_detour(luau_State* L, CompactDetourHook& hook, int field)
+{
+	Object* item = L->intop[0].isType(LUAU_USERDATA) ? L->intop[0].getObject() : nullptr;
+	const auto ret = reinterpret_cast<luau_CFunction>(hook.original)(L);
+	if (item && ret == 1 && L->outtop[-1].isType(LUAU_BOOL))
+	{
+		const auto rule = rule_for_store_item(item);
+		const int8_t value = field == 0 ? rule.giftable : rule.purchase_mode;
+		if (value != -1)
+		{
+			L->outtop[-1].value.as_bool = value != 0;
+		}
+	}
+	return ret;
+}
+
+static int store_item_giftable_detour(luau_State* L) { return store_item_rule_detour(L, store_item_giftable_hook, 0); }
+static int store_item_steam_detour(luau_State* L) { return store_item_rule_detour(L, store_item_steam_hook, 1); }
+static int store_item_platform_locked_detour(luau_State* L) { return store_item_rule_detour(L, store_item_platform_locked_hook, 1); }
 
 static int lua_AvatarEntry_excludedFromSimulacrum_get_detour(luau_State* L)
 {
@@ -5207,6 +5314,31 @@ static SOUP_FORCEINLINE void do_pointer_scans()
 			conout << "No results for swig types" << std::endl;
 #endif
 			log_optional_scan_failure(false);
+		}
+	}
+	if (have_scripting && game_version >= GV(44, 0, 0))
+	{
+		if (auto store_item = swig_types.find(soup::joaat::compileTimeHash("StoreItem")); store_item != swig_types.end())
+		{
+			for (const auto& entry : {
+				std::pair{"IsGiftable", std::pair{&store_item_giftable_hook, &store_item_giftable_detour}},
+				std::pair{"IsSteamPurchase", std::pair{&store_item_steam_hook, &store_item_steam_detour}},
+				std::pair{"IsPurchasePlatformLocked", std::pair{&store_item_platform_locked_hook, &store_item_platform_locked_detour}},
+			})
+			{
+				if (auto target = store_item->second->findMethod(wf_hash(entry.first)))
+				{
+					auto* hook = entry.second.first;
+					hook->detour = reinterpret_cast<void*>(entry.second.second);
+					hook->target = reinterpret_cast<void*>(target);
+					hook->code_cave = Module(nullptr).range.scan(CompactDetourHook::getCodeCavePattern()).as<void*>();
+					if (hook->code_cave)
+					{
+						hook->create();
+						hook->enable();
+					}
+				}
+			}
 		}
 	}
 
