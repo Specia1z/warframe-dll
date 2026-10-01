@@ -72,7 +72,7 @@ jobs:
           sun help create
           clang --version
           llvm-rc --version
-          upx --version
+          & (Join-Path $env:GITHUB_WORKSPACE "tools\upx.exe") --version
 
       - name: Build release DLL
         shell: cmd
